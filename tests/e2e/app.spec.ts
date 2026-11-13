@@ -98,12 +98,27 @@ test.describe('/appWithSSRData', () => {
     expect(people).toHaveLength(PEOPLE);
   });
 
-  test('every request gets a fresh, complete render', async ({ request }) => {
+  test('concurrent requests each get a complete render and cache', async ({
+    request,
+  }) => {
+    // Regression test: with one shared server cache, one request's wipeCache()
+    // emptied another request's cache mid-render.
     const pages = await Promise.all(
-      Array.from({ length: 5 }, () => request.get('/appWithSSRData')),
+      Array.from({ length: 20 }, (_, i) =>
+        request.get(i % 2 ? '/appWithSSRData' : '/appWithoutSSRData'),
+      ),
     );
-    for (const res of pages) {
-      expect((await res.text()).match(/<h2>/g)).toHaveLength(PEOPLE);
+    for (const [i, res] of pages.entries()) {
+      const html = await res.text();
+      if (i % 2) {
+        expect(html.match(/<h2>/g)).toHaveLength(PEOPLE);
+        const data = html.match(/window\.__INITIAL_DATA__ = '([^']*)'/)![1];
+        expect(Object.keys(JSON.parse(decodeURIComponent(data)))).toHaveLength(
+          1,
+        );
+      } else {
+        expect(html).toContain('<div>Loading...</div>');
+      }
     }
   });
 });

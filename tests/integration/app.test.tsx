@@ -188,3 +188,33 @@ describe('SSR -> hydration (/appWithSSRData behaviour)', () => {
     expect(renderToString(<App />).match(/<h2>/g)).toHaveLength(75);
   });
 });
+
+describe('concurrent server requests', () => {
+  // Mirrors framework/server/index.ts: each request runs in its own async
+  // context, calls wipeCache() first, then awaits renderApp().
+  const handleRequest = (withData: boolean) =>
+    new Promise<[string, string?]>((resolve) => {
+      setTimeout(() => {
+        wipeCache();
+        resolve(renderApp(withData));
+      });
+    });
+
+  it("keeps each request's cache separate when requests overlap", async () => {
+    // Mix in pages without server data: they wipe the cache but never
+    // preload, which is what dropped an SSR page's pending result before.
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => handleRequest(i % 2 === 0)),
+    );
+    const ssrResults = results.filter((_, i) => i % 2 === 0);
+
+    for (const [html, initialData] of ssrResults) {
+      expect(html.match(/<h2>/g)).toHaveLength(75);
+      const cache = JSON.parse(decodeURIComponent(initialData!)) as Record<
+        string,
+        unknown[]
+      >;
+      expect(Object.values(cache)[0]).toHaveLength(75);
+    }
+  });
+});
