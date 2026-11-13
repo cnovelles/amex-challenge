@@ -58,15 +58,16 @@ const setEntry = (url: string, entry: CacheEntry) => {
 };
 
 /**
- * Fetches a URL at most once. If there's already an entry (pending, success
- * or error) we reuse it, so concurrent callers share one network request.
- * The returned promise never rejects; failures are stored in the cache.
+ * Fetches a URL unless it's already pending or loaded. A pending entry is
+ * shared, so concurrent callers make one network request. A failed entry is
+ * not reused: the next caller fetches again, so a page can recover once the
+ * API is back. The returned promise never rejects; failures are stored in
+ * the cache so every component sees them.
  */
 const fetchOnce = (url: string): Promise<void> => {
   const existing = cache.get(url);
-  if (existing) {
-    return existing.status === 'pending' ? existing.promise : Promise.resolve();
-  }
+  if (existing?.status === 'pending') return existing.promise;
+  if (existing?.status === 'success') return Promise.resolve();
 
   const promise = (async () => {
     try {
@@ -86,6 +87,8 @@ const fetchOnce = (url: string): Promise<void> => {
   // Store the pending entry synchronously, before anything awaits,
   // so a second caller in the same tick sees it and doesn't fetch again.
   cache.set(url, { status: 'pending', data: null, error: null, promise });
+  // Components that show an earlier error switch to loading for the new try.
+  if (existing) notify(url);
   return promise;
 };
 
@@ -127,9 +130,10 @@ export const useCachingFetch: UseCachingFetch = (url) => {
   );
 
   // Side effects only in an effect: never fetch during render, and never on
-  // the server. Every component calls this, but fetchOnce dedupes.
+  // the server. Every component calls this: fetchOnce shares a pending
+  // request, skips loaded data, and tries a failed request again.
   useEffect(() => {
-    if (!cache.has(url)) void fetchOnce(url);
+    void fetchOnce(url);
   }, [url]);
 
   if (!entry) return NOT_STARTED;
