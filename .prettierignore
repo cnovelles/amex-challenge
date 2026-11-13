@@ -1,0 +1,8 @@
+dist
+node_modules
+package-lock.json
+framework/mock-server/mockServiceWorker.js
+playwright-report
+test-results
+tests/**/*-snapshots
+DevTask.md
