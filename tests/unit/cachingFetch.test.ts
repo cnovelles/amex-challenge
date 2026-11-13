@@ -178,7 +178,7 @@ describe('after a failed request', () => {
   it('fetches again on the next call instead of keeping the error', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse('down', 503));
     await preloadCachingFetch(URL_A);
-    expect(readCache(URL_A).error).toBe(
+    expect(readClientCache(URL_A).error).toBe(
       `Request to ${URL_A} failed with status 503`,
     );
 
@@ -207,7 +207,7 @@ describe('after a failed request', () => {
     });
 
     await expect(preloadCachingFetch(URL_A)).resolves.toBeUndefined();
-    expect(readCache(URL_A)).toEqual({
+    expect(readClientCache(URL_A)).toEqual({
       isLoading: false,
       data: null,
       error: 'fetch is not a function',
@@ -216,6 +216,22 @@ describe('after a failed request', () => {
     await preloadCachingFetch(URL_A);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(readCache(URL_A).data).toEqual([{ name: 'Ada' }]);
+  });
+});
+
+describe('server render after a failed request', () => {
+  it('shows loading instead of the error, so the browser can try again', async () => {
+    fetchMock.mockResolvedValue(jsonResponse('bad', 503));
+    await preloadCachingFetch(URL_A);
+
+    expect(readCache(URL_A)).toEqual({
+      isLoading: true,
+      data: null,
+      error: null,
+    });
+    expect(readClientCache(URL_A).error).toBe(
+      `Request to ${URL_A} failed with status 503`,
+    );
   });
 });
 

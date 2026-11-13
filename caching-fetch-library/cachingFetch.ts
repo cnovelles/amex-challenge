@@ -170,13 +170,20 @@ const NOT_STARTED = {
 export const useCachingFetch: UseCachingFetch = (url) => {
   // Reading the cache during render is what makes SSR work: on the server
   // there are no effects, so whatever is in the cache is what gets rendered.
-  // The same function is used as the server snapshot, so the first client
-  // render (hydration) sees exactly what the server saw.
   const getSnapshot = () => getCache().get(url);
+  // React uses the server snapshot on the server and for the hydration render.
+  // A failed server request shows as "not started": the server renders the
+  // loading state, the browser (which never receives errors) hydrates the
+  // same loading state, and the effect below then tries again. React 18 does
+  // the same when a Suspense boundary fails on the server.
+  const getServerSnapshot = () => {
+    const current = getSnapshot();
+    return current?.status === 'error' ? undefined : current;
+  };
   const entry = useSyncExternalStore(
     (listener) => subscribe(url, listener),
     getSnapshot,
-    getSnapshot,
+    getServerSnapshot,
   );
 
   // Side effects only in an effect: never fetch during render, and never on
