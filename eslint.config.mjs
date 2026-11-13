@@ -38,6 +38,11 @@ export default tseslint.config(
     languageOptions: { sourceType: 'commonjs', globals: globals.node },
   },
   {
+    // Playwright fixtures call a function named `use`, which isn't React's hook
+    files: ['tests/e2e/**', 'tests/visual/**', 'playwright.config.ts'],
+    rules: { 'react-hooks/rules-of-hooks': 'off' },
+  },
+  {
     // framework code was handed to us as-is; don't fail CI on its unused handler args
     files: ['framework/**/*.{ts,tsx}'],
     rules: { '@typescript-eslint/no-unused-vars': 'warn' },
