@@ -160,7 +160,3 @@ In the order I'd do them on a real team:
 7. Linux visual baselines so visual tests run in CI.
 
 Ideas for later, not commitments: AI code review on pull requests as an extra reviewer on top of the CI gates (if the org has approved a tool), and at real scale a circuit breaker and stale-if-error caching, which are platform or gateway decisions.
-
-## Time spent
-
-_TODO: fill in._
