@@ -30,7 +30,7 @@
   },
   "msw": {
     "workerDirectory": [
-      "mockServer"
+      "framework/mock-server"
     ]
   }
 }
