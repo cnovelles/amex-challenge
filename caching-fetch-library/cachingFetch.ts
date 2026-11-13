@@ -69,7 +69,11 @@ const fetchOnce = (url: string): Promise<void> => {
   if (existing?.status === 'pending') return existing.promise;
   if (existing?.status === 'success') return Promise.resolve();
 
-  const promise = (async () => {
+  // Start the work on the next microtask, not right away. If fetch throws
+  // synchronously (no fetch in this runtime, a broken polyfill), the catch
+  // below must run after the pending entry exists, or the error is lost and
+  // the entry stays pending forever.
+  const promise = Promise.resolve().then(async () => {
     try {
       const response = await fetch(url);
       if (!response.ok) {
@@ -82,10 +86,10 @@ const fetchOnce = (url: string): Promise<void> => {
     } catch (err) {
       setEntry(url, { status: 'error', data: null, error: toError(err) });
     }
-  })();
+  });
 
-  // Store the pending entry synchronously, before anything awaits,
-  // so a second caller in the same tick sees it and doesn't fetch again.
+  // Store the pending entry synchronously, so a second caller in the same
+  // tick sees it and doesn't fetch again.
   cache.set(url, { status: 'pending', data: null, error: null, promise });
   // Components that show an earlier error switch to loading for the new try.
   if (existing) notify(url);
