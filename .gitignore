@@ -1,0 +1,13 @@
+node_modules/
+dist/
+mockServer/
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.idea/
+.vscode/
+.DS_Store
+*.log
+.env
+.env.*
