@@ -115,6 +115,51 @@ describe('preloadCachingFetch', () => {
   });
 });
 
+describe('after a failed request', () => {
+  it('fetches again on the next call instead of keeping the error', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse('down', 503));
+    await preloadCachingFetch(URL_A);
+    expect(readCache(URL_A).error).toBe(
+      `Request to ${URL_A} failed with status 503`,
+    );
+
+    await preloadCachingFetch(URL_A);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(readCache(URL_A)).toEqual({
+      isLoading: false,
+      data: [{ name: 'Ada' }],
+      error: null,
+    });
+  });
+
+  it('shares one new request between concurrent callers', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse('down', 503));
+    await preloadCachingFetch(URL_A);
+
+    await Promise.all(
+      Array.from({ length: 10 }, () => preloadCachingFetch(URL_A)),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('stores a synchronous fetch throw as an error, not a stuck pending entry', async () => {
+    fetchMock.mockImplementationOnce(() => {
+      throw new TypeError('fetch is not a function');
+    });
+
+    await expect(preloadCachingFetch(URL_A)).resolves.toBeUndefined();
+    expect(readCache(URL_A)).toEqual({
+      isLoading: false,
+      data: null,
+      error: 'fetch is not a function',
+    });
+
+    await preloadCachingFetch(URL_A);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(readCache(URL_A).data).toEqual([{ name: 'Ada' }]);
+  });
+});
+
 describe('the hook before anything is cached', () => {
   it('reports loading and does not fetch during render', () => {
     expect(readCache(URL_A)).toEqual({
