@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   checks:
-    name: Build
+    name: Lint, typecheck, build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -24,5 +24,8 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
       - run: npm run build
       - run: npm audit --omit=dev --audit-level=high
