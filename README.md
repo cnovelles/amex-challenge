@@ -86,3 +86,81 @@ I also sanity-checked the tests by breaking the library on purpose (no escaping,
   - esbuild 0.21 → 0.28: the old version had a dev server advisory.
   - Fastify 4 → 5: Fastify 4 had several high severity advisories. The server only uses basic APIs, so nothing in the framework had to change. Verified with the e2e suite.
   - `@types/node` 20 → 22 to match the pinned Node.
+
+## Known issues
+
+This repo stands in for a real One App feature, so I split the open issues by who would actually fix them. In real life the `framework/` folder is the One App platform, `application/` is a Holocron module owned by a feature team, and the people API belongs to another team. A feature team fixes what it owns and raises the rest with the owner; it doesn't rewrite the platform.
+
+### Only because it's a take-home
+
+Not real issues, just the stand-in setup. I wouldn't "fix" these, they go away in a real environment.
+
+- MSW is the API, and it's always on and bundled into `client.js`. The browser also waits for the service worker before it hydrates. In a real setup, mocks come from the team's mocking standard and never ship. (AmEx's own Parrot mock tool was archived in 2025, so MSW is a fair pick here.)
+- The API URL is a hardcoded randomapi.com link. Real config comes from the environment and points at a gateway.
+- `framework/server` is a small Fastify server, not One App. So things like `listen({ port: 3000 })` binding to localhost only, `readFileSync('./dist/...')` relative to the working directory, and `runServer()` not handling startup failures are stand-in problems.
+- CI is GitHub Actions with Dependabot because the repo is on GitHub. On a team I'd use the org's pipeline templates and security scanning.
+- I picked the Node version (`.nvmrc`) and upgraded Fastify 4 to 5 myself, because Fastify 4 had high severity advisories. On a real team the platform decides both, and I'd raise the advisory with them instead of upgrading their server in a feature PR.
+
+### Our team would change
+
+Things a feature team owns, roughly in priority order.
+
+- **Use fetchye instead of this cache.** AmEx already owns and maintains it, it has One App integration, and its per-request provider fixes the shared server cache issue below. So there's no build vs buy question here: a second cache would just be one more thing for a team to own. If a feature needed something fetchye doesn't do, I'd first check the need is real, then use fetchye's extension points in the app (a custom fetcher, which is where this repo's timeout would live, `mapKeyToCacheKey`/`mapOptionsToKey`, or a wrapper hook). I'd only propose a change to fetchye itself if several teams needed it, and leave that call to its owners.
+- **Loading, error and empty states.** Right now they're plain text: `Loading...` and `Error: <message>`, and the message includes the API URL. I'd want a skeleton or spinner with `role="status"`, a friendly message in an `alert` region with a "Try again" button (detail goes to the logs), and an error boundary around the module.
+- **Accessibility in the module.** People are plain `div`s. A `<ul>`/`<li>` list inside `<main>` lets screen readers announce the count and move through it.
+- **Pagination on our side.** The API returns all 75 people and the app renders every one. That's an unbounded list: response size, SSR time, the serialized cache in the HTML and DOM size all grow with the data. Until the API supports it (see below), I'd render in pages in the module so the DOM stays small, and add list virtualization for very long pages. The library already handles real pagination, since each page URL (`?cursor=...&limit=25`) is its own cache entry with dedupe, preload and serialization.
+- **Map and validate the data once.** `validateData` runs on every render in ~151 components. Validating once when data lands in the cache would be cheaper (the benchmark is there to measure it). The same mapping layer is where display formatting goes until the API sends raw values. `key={person.email}` assumes emails are unique, and `data[index]` assumes the index exists.
+- **Browser retry.** A failed browser request stays an error until a reload. I'd add 1 or 2 retries with exponential backoff and full jitter, only for timeouts, network errors, 5xx and 429, never for other 4xx. Jitter matters because when the API goes down every client fails at the same moment, and without it they all retry at the same moment too. I didn't add it yet because dedupe already keeps it to one request per page, and the server-failure case already gets a browser retry.
+- **Cache lifetime.** No TTL, invalidation or size limit, so the browser cache only grows. Fine for this app, not for a long-lived SPA. The cache key is just the URL (no options, headers or methods), it's JSON only, and `data` is `unknown`, so every component has to validate. fetchye covers most of this.
+- **Lint config.** I'd use `eslint-config-amex`, AmEx's shared ESLint config, the same way the tests use `amex-jest-preset`. It needs ESLint 9 and TypeScript 5, and this repo is on ESLint 10 and TypeScript 6, so it's a downgrade I'd do in its own PR.
+- **valibot 1.x.** 0.30 has a moderate advisory in `record()`, which the app doesn't use. 1.x renames `v.Output` to `v.InferOutput` in `application/validation.ts`. Its own PR.
+
+### Raise with the owning team
+
+Real production gaps, but not ours to change. I'd raise each one with its owner.
+
+**Platform (One App)**
+
+- `buildHtmlDoc` injects data into a single-quoted string with no escaping. The library works around it, but `<script type="application/json">` plus `JSON.parse` would be safer, and it's also what a strict CSP needs.
+- Security headers: no Content-Security-Policy, HSTS, `X-Content-Type-Options` or `frame-ancestors`. In One App the CSP comes from the root module's config, so our part is making sure the module works under it.
+- No error handler around render. If `validateData` throws, the server returns its default JSON 500. Same for 404s (the browser's `/favicon.ico` request already gets one). Error pages belong to the platform and root module.
+- The per-request cache depends on the framework calling `wipeCache()` synchronously at the top of each request. If someone moves that call after an `await`, requests start sharing a cache again. The concurrency tests would catch it. One App with fetchye already gives each request its own cache.
+- `client.js` is ~450kb minified (mostly MSW), served with no compression, no `Cache-Control` and no content hash in the file name. Bundling, compression and asset caching are platform concerns.
+- Health checks, graceful shutdown, metrics, tracing and client error reporting. A module uses the platform's logger and metrics instead of adding its own.
+- The viewport meta has `user-scalable=no` and `maximum-scale=1.0`, which blocks pinch zoom and fails WCAG 1.4.4. The page shell is the platform's.
+
+**Edge and security**
+
+- The pages render names, emails, addresses and balances, and the same data sits in `__INITIAL_DATA__` in the page source. There's no `Cache-Control` on HTML, so a CDN or shared proxy could cache one person's page and serve it to someone else. Pages with personal data need `Cache-Control: private, no-store`.
+- No authentication or authorization; anyone can load everyone's balance.
+- No rate limiting on the server-rendered routes. Every request does a full render and an API call.
+
+**API owner**
+
+- Cursor-based pagination (cursors, so new rows don't shift pages).
+- Raw values instead of display strings: `balance` is `"$9,632.11"` and `created` is `"September 17, 2021"`. Money should be an amount in minor units plus a currency code, and dates ISO 8601, so the app can format them per locale. That matters for a product used in many markets. I'd ask for it as a new API version and map the old format in the module meanwhile.
+- A stable ID per person, for list keys.
+
+### Tests
+
+- Visual baselines are macOS-only (screenshots depend on OS fonts), so CI skips them. Next step is generating Linux baselines in the Playwright Docker image.
+- Fastify's request logging is noisy in the Playwright output.
+- `npm audit` shows moderate advisories in Jest's own dependencies (old `glob`/`minimatch` and `deepmerge`). They're dev-only and never ship; the production audit in CI is clean. The fix is a Jest release that updates them, not `npm audit fix --force`.
+
+## Next steps
+
+In the order I'd do them on a real team:
+
+1. Move the module to fetchye, with the 3 second timeout in a custom fetcher.
+2. Loading, error and empty states, plus the accessibility fixes in the module.
+3. Raise the API asks (cursor pagination, raw money and dates, stable IDs) with the API owner, and render in pages until then.
+4. Raise the `Cache-Control` and auth gaps with edge and security. These matter most for a page with personal data.
+5. Validate once per cache entry, then browser retry with backoff and jitter.
+6. `eslint-config-amex` and valibot 1.x, each in its own PR.
+7. Linux visual baselines so visual tests run in CI.
+
+Ideas for later, not commitments: AI code review on pull requests as an extra reviewer on top of the CI gates (if the org has approved a tool), and at real scale a circuit breaker and stale-if-error caching, which are platform or gateway decisions.
+
+## Time spent
+
+_TODO: fill in._
