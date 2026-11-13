@@ -1,3 +1,6 @@
+/**
+ * @jest-environment jest-fixed-jsdom
+ */
 import {
   afterEach,
   beforeEach,
@@ -13,7 +16,11 @@ import {
   wipeCache,
 } from '../../caching-fetch-library/cachingFetch';
 import buildHtmlDoc from '../../framework/server/buildHtmlDoc';
-import { extractInitialData, readCache } from '../helpers/readCache';
+import {
+  extractInitialData,
+  readCache,
+  readClientCache,
+} from '../helpers/readCache';
 
 const URL_A = 'https://example.test/a';
 const URL_B = 'https://example.test/b';
@@ -25,11 +32,15 @@ const jsonResponse = (body: unknown, status = 200) =>
   });
 
 const realFetch = globalThis.fetch;
-let fetchMock: jest.Mock<(url: string) => Promise<Response>>;
+let fetchMock: jest.Mock<
+  (url: string, init?: RequestInit) => Promise<Response>
+>;
 
 beforeEach(() => {
   wipeCache();
-  fetchMock = jest.fn(async (_url: string) => jsonResponse([{ name: 'Ada' }]));
+  fetchMock = jest.fn(async (_url: string, _init?: RequestInit) =>
+    jsonResponse([{ name: 'Ada' }]),
+  );
   globalThis.fetch = fetchMock as unknown as typeof fetch;
 });
 
@@ -42,7 +53,7 @@ describe('preloadCachingFetch', () => {
     await preloadCachingFetch(URL_A);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith(URL_A);
+    expect(fetchMock).toHaveBeenCalledWith(URL_A, expect.anything());
     expect(readCache(URL_A)).toEqual({
       isLoading: false,
       data: [{ name: 'Ada' }],
@@ -86,7 +97,7 @@ describe('preloadCachingFetch', () => {
     fetchMock.mockResolvedValue(jsonResponse({ message: 'nope' }, 500));
 
     await expect(preloadCachingFetch(URL_A)).resolves.toBeUndefined();
-    expect(readCache(URL_A)).toEqual({
+    expect(readClientCache(URL_A)).toEqual({
       isLoading: false,
       data: null,
       error: `Request to ${URL_A} failed with status 500`,
@@ -97,21 +108,69 @@ describe('preloadCachingFetch', () => {
     fetchMock.mockRejectedValue(new TypeError('fetch failed'));
 
     await expect(preloadCachingFetch(URL_A)).resolves.toBeUndefined();
-    expect(readCache(URL_A).error).toBe('fetch failed');
+    expect(readClientCache(URL_A).error).toBe('fetch failed');
   });
 
   it('stores invalid JSON as an error', async () => {
     fetchMock.mockResolvedValue(new Response('<html>not json</html>'));
 
     await preloadCachingFetch(URL_A);
-    expect(readCache(URL_A).error).toMatch(/JSON/);
+    expect(readClientCache(URL_A).error).toMatch(/JSON/);
   });
 
   it('wraps non-Error rejections in an Error', async () => {
     fetchMock.mockRejectedValue('boom');
 
     await preloadCachingFetch(URL_A);
-    expect(readCache(URL_A).error).toBe('boom');
+    expect(readClientCache(URL_A).error).toBe('boom');
+  });
+});
+
+describe('request timeout', () => {
+  /** A fetch that never answers, but stops when its signal aborts (like real fetch). */
+  const hangingFetch = (_url: string, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () =>
+        reject(new DOMException('This operation was aborted', 'AbortError')),
+      );
+    });
+
+  beforeEach(() => {
+    // Only the timers: faking microtasks or nextTick would stall promises.
+    jest.useFakeTimers({
+      doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'],
+    });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('stores a timeout error when the API does not answer within 3 seconds', async () => {
+    fetchMock.mockImplementation(hangingFetch);
+    const preload = preloadCachingFetch(URL_A);
+
+    await jest.advanceTimersByTimeAsync(2999);
+    expect(readCache(URL_A).isLoading).toBe(true);
+
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(preload).resolves.toBeUndefined();
+    expect(readClientCache(URL_A)).toEqual({
+      isLoading: false,
+      data: null,
+      error: `Request to ${URL_A} timed out after 3000ms`,
+    });
+  });
+
+  it('clears the timer when the request finishes in time', async () => {
+    await preloadCachingFetch(URL_A);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('clears the timer when the request fails in time', async () => {
+    fetchMock.mockRejectedValue(new TypeError('fetch failed'));
+    await preloadCachingFetch(URL_A);
+    expect(jest.getTimerCount()).toBe(0);
   });
 });
 

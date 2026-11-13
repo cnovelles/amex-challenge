@@ -84,6 +84,12 @@ const setEntry = (cache: Cache, url: string, entry: CacheEntry) => {
 };
 
 /**
+ * One limit for every request. Short, because on the server a person is
+ * waiting for the page. After a server failure the browser tries again.
+ */
+const FETCH_TIMEOUT_MS = 3000;
+
+/**
  * Fetches a URL unless it's already pending or loaded. A pending entry is
  * shared, so concurrent callers make one network request. A failed entry is
  * not reused: the next caller fetches again, so a page can recover once the
@@ -101,8 +107,13 @@ const fetchOnce = (url: string): Promise<void> => {
   // below must run after the pending entry exists, or the error is lost and
   // the entry stays pending forever.
   const promise = Promise.resolve().then(async () => {
+    // Without a limit, a hung API hangs the SSR response with it.
+    // setTimeout + AbortController (not AbortSignal.timeout) so fake timers
+    // in tests can control it. The signal also covers reading the body.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
       if (!response.ok) {
         throw new Error(
           `Request to ${url} failed with status ${response.status}`,
@@ -114,8 +125,12 @@ const fetchOnce = (url: string): Promise<void> => {
       setEntry(cache, url, {
         status: 'error',
         data: null,
-        error: toError(err),
+        error: controller.signal.aborted
+          ? new Error(`Request to ${url} timed out after ${FETCH_TIMEOUT_MS}ms`)
+          : toError(err),
       });
+    } finally {
+      clearTimeout(timer);
     }
   });
 
