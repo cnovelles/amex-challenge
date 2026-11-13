@@ -1,8 +1,11 @@
 {
   "name": "challenge",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
+  "description": "People directory app with an SSR-aware caching fetch library",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "npm run build:server && npm run build:client",
     "build:server": "rm -rf dist && mkdir dist && cp ./framework/mock-server/mockServiceWorker.js dist/ && esbuild ./framework/server/index.js --bundle --minify --platform=node --outfile=dist/server.js",
@@ -10,8 +13,8 @@
     "start": "npm run build && node dist/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "Christian Gonzalez Lopez",
+  "license": "UNLICENSED",
   "devDependencies": {
     "@types/node": "^20.12.12",
     "@types/react": "^18.3.2",
