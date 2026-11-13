@@ -84,6 +84,12 @@ const setEntry = (cache: Cache, url: string, entry: CacheEntry) => {
 };
 
 /**
+ * One limit for every request. Short, because on the server a person is
+ * waiting for the page. After a server failure the browser tries again.
+ */
+const FETCH_TIMEOUT_MS = 3000;
+
+/**
  * Fetches a URL unless it's already pending or loaded. A pending entry is
  * shared, so concurrent callers make one network request. A failed entry is
  * not reused: the next caller fetches again, so a page can recover once the
@@ -101,8 +107,13 @@ const fetchOnce = (url: string): Promise<void> => {
   // below must run after the pending entry exists, or the error is lost and
   // the entry stays pending forever.
   const promise = Promise.resolve().then(async () => {
+    // Without a limit, a hung API hangs the SSR response with it.
+    // setTimeout + AbortController (not AbortSignal.timeout) so fake timers
+    // in tests can control it. The signal also covers reading the body.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
       if (!response.ok) {
         throw new Error(
           `Request to ${url} failed with status ${response.status}`,
@@ -114,8 +125,12 @@ const fetchOnce = (url: string): Promise<void> => {
       setEntry(cache, url, {
         status: 'error',
         data: null,
-        error: toError(err),
+        error: controller.signal.aborted
+          ? new Error(`Request to ${url} timed out after ${FETCH_TIMEOUT_MS}ms`)
+          : toError(err),
       });
+    } finally {
+      clearTimeout(timer);
     }
   });
 
@@ -155,13 +170,20 @@ const NOT_STARTED = {
 export const useCachingFetch: UseCachingFetch = (url) => {
   // Reading the cache during render is what makes SSR work: on the server
   // there are no effects, so whatever is in the cache is what gets rendered.
-  // The same function is used as the server snapshot, so the first client
-  // render (hydration) sees exactly what the server saw.
   const getSnapshot = () => getCache().get(url);
+  // React uses the server snapshot on the server and for the hydration render.
+  // A failed server request shows as "not started": the server renders the
+  // loading state, the browser (which never receives errors) hydrates the
+  // same loading state, and the effect below then tries again. React 18 does
+  // the same when a Suspense boundary fails on the server.
+  const getServerSnapshot = () => {
+    const current = getSnapshot();
+    return current?.status === 'error' ? undefined : current;
+  };
   const entry = useSyncExternalStore(
     (listener) => subscribe(url, listener),
     getSnapshot,
-    getSnapshot,
+    getServerSnapshot,
   );
 
   // Side effects only in an effect: never fetch during render, and never on

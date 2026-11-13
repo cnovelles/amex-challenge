@@ -1,5 +1,7 @@
 import React from 'react';
 import { runInNewContext } from 'node:vm';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderToString } from 'react-dom/server';
 import { useCachingFetch } from '../../caching-fetch-library/cachingFetch';
 
@@ -18,6 +20,31 @@ export const readCache = (
     return null;
   };
   renderToString(<Probe />);
+  if (!result) throw new Error('Probe did not render');
+  return result;
+};
+
+/**
+ * Same as readCache, but renders in the browser (needs jsdom). The browser
+ * render shows error entries; the server render shows them as loading so the
+ * browser can try again after hydration.
+ *
+ * Returns what the first render saw. Mounting runs the hook's effect, which
+ * fetches a failed URL again, so later renders show that new request.
+ */
+export const readClientCache = (url: string): ReturnType<typeof readCache> => {
+  (
+    globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+  let result: ReturnType<typeof readCache> | undefined;
+  const Probe = () => {
+    const { isLoading, data, error } = useCachingFetch(url);
+    result ??= { isLoading, data, error: error ? error.message : null };
+    return null;
+  };
+  const root = createRoot(document.createElement('div'));
+  act(() => root.render(<Probe />));
+  act(() => root.unmount());
   if (!result) throw new Error('Probe did not render');
   return result;
 };

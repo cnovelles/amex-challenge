@@ -5,7 +5,7 @@ import React, { StrictMode } from 'react';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { hydrateRoot } from 'react-dom/client';
 import { renderToString } from 'react-dom/server';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import {
   afterAll,
   afterEach,
@@ -112,14 +112,31 @@ describe('server render', () => {
     expect(initialData).toBeTruthy();
   });
 
-  it('renders the app error state instead of throwing when preload fails', async () => {
+  it('renders Loading instead of throwing when preload fails, so the browser can retry', async () => {
     server.use(http.get(PEOPLE_URL, () => HttpResponse.error()));
 
     const [html, initialData] = await renderApp(true);
 
-    expect(html).toContain('Error:');
+    expect(html).toBe('<div>Loading...</div>');
     // nothing successful to hand to the browser
     expect(JSON.parse(decodeURIComponent(initialData!))).toEqual({});
+  });
+
+  it('renders Loading after 3 seconds when the API hangs', async () => {
+    jest.useFakeTimers({
+      doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'],
+    });
+    try {
+      server.use(http.get(PEOPLE_URL, () => delay('infinite')));
+
+      const rendering = renderApp(true);
+      await jest.advanceTimersByTimeAsync(3000);
+      const [html] = await rendering;
+
+      expect(html).toBe('<div>Loading...</div>');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 
@@ -177,6 +194,41 @@ describe('SSR -> hydration (/appWithSSRData behaviour)', () => {
     );
 
     expect(recoverableErrors).toEqual([]);
+    expect(requests.count).toBe(1);
+    requests.stop();
+    container.remove();
+  });
+
+  it('hydrates cleanly after a failed server preload, then fetches in the browser', async () => {
+    // server side: the API fails once
+    server.use(
+      http.get(PEOPLE_URL, () => HttpResponse.error(), { once: true }),
+    );
+    const [serverHtml, initialData] = await renderApp(true);
+    const page = buildHtmlDoc([serverHtml, initialData]);
+
+    // fresh browser
+    wipeCache();
+    const requests = countPeopleRequests();
+    const consoleError = jest.spyOn(console, 'error');
+    const recoverableErrors: unknown[] = [];
+    initializeCache(extractInitialData(page)!);
+
+    const container = document.createElement('div');
+    container.innerHTML = serverHtml;
+    document.body.appendChild(container);
+
+    await act(async () => {
+      hydrateRoot(container, <App />, {
+        onRecoverableError: (error) => recoverableErrors.push(error),
+      });
+    });
+    await waitFor(() =>
+      expect(container.querySelectorAll('h2')).toHaveLength(75),
+    );
+
+    expect(recoverableErrors).toEqual([]);
+    expect(consoleError).not.toHaveBeenCalled();
     expect(requests.count).toBe(1);
     requests.stop();
     container.remove();
