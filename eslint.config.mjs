@@ -33,6 +33,11 @@ export default tseslint.config(
     },
   },
   {
+    // Jest reads its config as CommonJS
+    files: ['jest.config.js'],
+    languageOptions: { sourceType: 'commonjs', globals: globals.node },
+  },
+  {
     // framework code was handed to us as-is; don't fail CI on its unused handler args
     files: ['framework/**/*.{ts,tsx}'],
     rules: { '@typescript-eslint/no-unused-vars': 'warn' },
