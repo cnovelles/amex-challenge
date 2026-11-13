@@ -3,6 +3,7 @@
 // However, you must not change the surface API presented from this file,
 // and you should not need to change any other files in the project to complete the challenge
 
+import type { AsyncLocalStorage } from 'node:async_hooks';
 import { useEffect, useSyncExternalStore } from 'react';
 
 type UseCachingFetch = (url: string) => {
@@ -25,7 +26,33 @@ type CacheEntry =
   | { status: 'success'; data: unknown; error: null }
   | { status: 'error'; data: null; error: Error };
 
-const cache = new Map<string, CacheEntry>();
+type Cache = Map<string, CacheEntry>;
+
+/**
+ * Per-request caches on the server.
+ *
+ * The server handles requests concurrently, and calls wipeCache() at the
+ * start of each one. With a single module-level Map, request B's wipe would
+ * empty the cache while request A is still preloading, so A would render and
+ * serialize nothing. Instead, wipeCache() gives the current request its own
+ * Map through AsyncLocalStorage, and everything that request does afterwards
+ * (preload, render, serialize) sees only that Map.
+ *
+ * getBuiltinModule keeps esbuild from trying to bundle async_hooks into the
+ * browser build. In the browser (or older Node) it's undefined and we fall
+ * back to one shared Map, which is correct there: one page, one user.
+ */
+const requestCaches: AsyncLocalStorage<Cache> | null = (() => {
+  const getBuiltin =
+    typeof process === 'undefined' ? undefined : process.getBuiltinModule;
+  if (typeof getBuiltin !== 'function') return null;
+  const { AsyncLocalStorage } = getBuiltin('node:async_hooks');
+  return new AsyncLocalStorage<Cache>();
+})();
+
+let sharedCache: Cache = new Map();
+
+const getCache = (): Cache => requestCaches?.getStore() ?? sharedCache;
 const listeners = new Map<string, Set<() => void>>();
 
 const notify = (url: string) => {
@@ -48,13 +75,12 @@ const subscribe = (url: string, listener: () => void) => {
 const toError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value));
 
-const setEntry = (url: string, entry: CacheEntry) => {
-  // If wipeCache() ran while this request was in flight, the pending entry is
-  // gone. Don't resurrect a result that belongs to an older cache generation.
-  const current = cache.get(url);
-  if (!current || current.status !== 'pending') return;
+const setEntry = (cache: Cache, url: string, entry: CacheEntry) => {
+  // Write into the cache the request was started from. If wipeCache() swapped
+  // in a new one meanwhile, this lands in the old, orphaned Map and is dropped,
+  // instead of leaking a stale result into the new cache.
   cache.set(url, entry);
-  notify(url);
+  if (cache === getCache()) notify(url);
 };
 
 /**
@@ -65,6 +91,7 @@ const setEntry = (url: string, entry: CacheEntry) => {
  * the cache so every component sees them.
  */
 const fetchOnce = (url: string): Promise<void> => {
+  const cache = getCache();
   const existing = cache.get(url);
   if (existing?.status === 'pending') return existing.promise;
   if (existing?.status === 'success') return Promise.resolve();
@@ -82,9 +109,13 @@ const fetchOnce = (url: string): Promise<void> => {
         );
       }
       const data: unknown = await response.json();
-      setEntry(url, { status: 'success', data, error: null });
+      setEntry(cache, url, { status: 'success', data, error: null });
     } catch (err) {
-      setEntry(url, { status: 'error', data: null, error: toError(err) });
+      setEntry(cache, url, {
+        status: 'error',
+        data: null,
+        error: toError(err),
+      });
     }
   });
 
@@ -126,7 +157,7 @@ export const useCachingFetch: UseCachingFetch = (url) => {
   // there are no effects, so whatever is in the cache is what gets rendered.
   // The same function is used as the server snapshot, so the first client
   // render (hydration) sees exactly what the server saw.
-  const getSnapshot = () => cache.get(url);
+  const getSnapshot = () => getCache().get(url);
   const entry = useSyncExternalStore(
     (listener) => subscribe(url, listener),
     getSnapshot,
@@ -188,7 +219,7 @@ export const serializeCache = (): string => {
   // Only successful results go to the browser. Errors and in-flight requests
   // are left out so the browser can try again on its own.
   const successful: Record<string, unknown> = {};
-  cache.forEach((entry, url) => {
+  getCache().forEach((entry, url) => {
     if (entry.status === 'success') successful[url] = entry.data;
   });
 
@@ -212,6 +243,7 @@ export const initializeCache = (serializedCache: string): void => {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return;
   }
+  const cache = getCache();
   Object.entries(parsed as Record<string, unknown>).forEach(([url, data]) => {
     cache.set(url, { status: 'success', data, error: null });
     notify(url);
@@ -219,5 +251,12 @@ export const initializeCache = (serializedCache: string): void => {
 };
 
 export const wipeCache = (): void => {
-  cache.clear();
+  // Swap in a new Map rather than clearing the old one, so a request that is
+  // still running keeps its own data.
+  const fresh: Cache = new Map();
+  sharedCache = fresh;
+  // enterWith scopes `fresh` to the current request: the framework calls
+  // wipeCache() synchronously at the top of each request handler, so the
+  // rest of that handler (preload, render, serialize) runs inside it.
+  requestCaches?.enterWith(fresh);
 };
