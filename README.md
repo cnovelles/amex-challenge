@@ -35,6 +35,42 @@ MSW mocks the people API in both Node and the browser, so no network is needed. 
 
 First time running Playwright: `npx playwright install chromium`.
 
+## Task 2: how the caching fetch works
+
+The surface API is unchanged. Under the hood:
+
+**Cache.** A `Map` of URL to an entry that is `pending` (holds the in-flight promise), `success` (holds the data) or `error` (holds the error). Entries get replaced, never mutated, so each entry object is a stable snapshot for React.
+
+**Dedupe.** The pending entry, promise included, goes into the map synchronously before anything awaits. Anyone else asking for that URL in the same tick gets the same promise. That's what keeps `/appWithoutSSRData` at 1 request even though App, every Person and every Name call the hook, and it also holds under StrictMode where effects run twice.
+
+**The hook.** `useCachingFetch` reads the cache during render with `useSyncExternalStore` and only starts a fetch inside `useEffect`. That split matters:
+
+- On the server there are no effects, so the server renders whatever is in the cache. If it was preloaded you get the full list; if not you get "Loading..." and nothing gets fetched.
+- The server snapshot is the same cache read, with one difference: an `error` entry shows as "not started". So when the server preload fails, the server renders "Loading..." and the browser (which never gets errors, see below) hydrates the same "Loading...". No hydration mismatch, and the effect then tries the request again in the browser. React 18 does the same thing when a Suspense boundary fails on the server: it sends the fallback and retries on the client.
+- When a request settles, subscribers for that URL get notified and re-render. They unsubscribe on unmount.
+
+**Preload.** `preloadCachingFetch` awaits the shared fetch and never throws, so a failed API never turns into a 500. The server tries once and doesn't retry: a person is waiting on that response, and every server retry adds a full timeout before they see anything. It also adds load to an API that's already struggling, from every user at once. Failing fast and letting the browser try again is the better trade.
+
+**Timeout.** Every request gets 3 seconds (`AbortController` + `setTimeout`, cleared when the request settles). Without it, a hung API hangs the SSR response with it. It's one constant because the surface API has no options. I used `setTimeout` instead of `AbortSignal.timeout` so fake timers can test it without waiting 3 real seconds.
+
+**Tradeoff:** with JavaScript off and the API down, the page shows "Loading..." instead of an error. The acceptance criteria only need JS-off to work when the API works, and for everyone with JS on this gives a working page instead of an error.
+
+**Serialize / initialize.** Only successful entries get sent to the browser, so errors and in-flight requests are retried there instead of being frozen in. The framework injects the string as `window.__INITIAL_DATA__ = '...'` with no escaping, so a `'`, a `\` or a `</script>` in the data would break the page or open an XSS hole. I run the JSON through `encodeURIComponent` and also encode `'`. The output only has characters that are safe inside a single-quoted JS string inside a script tag, and `initializeCache(serializeCache())` round-trips without the browser in the middle. Bad input to `initializeCache` is logged and ignored, and the hook just fetches.
+
+**Per-request server cache.** This one came up from testing, not from the instructions. The server handles requests concurrently and calls `wipeCache()` at the top of each one. With a single module-level cache, request B's wipe emptied the cache while request A was still preloading, so A rendered "Loading..." with an empty `__INITIAL_DATA__`. The parallel Playwright tests caught it as an intermittent failure. Now `wipeCache()` creates a fresh `Map` and scopes it to the current request with `AsyncLocalStorage.enterWith`. That works because the framework calls `wipeCache()` synchronously at the start of the handler, so preload, render and serialize all run inside that request's context. `async_hooks` is loaded through `process.getBuiltinModule`, so esbuild never pulls it into the browser bundle, and the browser just uses one shared `Map` (one page, one user). I'd rather the framework did this explicitly (see known issues), but this fixes it without touching files outside the library.
+
+## Testing
+
+All tests live in `tests/`. I tried to cover each acceptance criterion at more than one level.
+
+- **Unit** (`tests/unit`, Jest + jsdom, mocked `fetch`): 150 concurrent preloads make 1 fetch, error handling for non-2xx / network / bad JSON, the 3 second timeout (fake timers) and that the timer gets cleared, the server render showing Loading for a failed request, serialize leaves out errors and pending, round trip, a nasty payload (`O'Brien`, backslashes, `</script>`, emoji, U+2028) pushed through the real `buildHtmlDoc` and run in a `node:vm` sandbox like a browser would, garbage input, and wipe races.
+- **Integration** (`tests/integration`, Jest + jsdom + Testing Library + MSW using the app's real handler): the real `App` makes 1 request on the client (also under StrictMode), the framework's `renderApp` renders Loading or the full list, SSR then `hydrateRoot` with 0 requests and no hydration errors, a failed server preload that hydrates with no errors and then loads the list in the browser, a hung API that still renders after 3 seconds, error states, and 10 overlapping simulated requests each keeping their own cache.
+- **End-to-end** (`tests/e2e`, Playwright + Chromium against `npm start`): exactly 1 people API request on `/appWithoutSSRData`, 0 on `/appWithSSRData`, the list with JS disabled, no console or hydration errors, `__INITIAL_DATA__` cleaned up, raw HTML and injected cache shape, 20 concurrent requests to the real server, landing page links, asset content types.
+- **Visual** (`tests/visual`): screenshot baselines for the landing page and the directory. The client-rendered page has to match the server HTML baseline pixel for pixel.
+- **Performance** (`tests/e2e/performance.spec.ts` + `npm run bench`): loose budgets for SSR response time and time to list, a check that the list is in the server HTML even with `client.js` blocked, and a tinybench report (on my machine: full SSR render ~6.4ms, serialize/initialize ~0.12ms).
+
+I also sanity-checked the tests by breaking the library on purpose (no escaping, no dedupe, no per-request cache) and making sure the right tests failed. Library coverage is ~99% statements and 100% lines. The one uncovered branch is the browser fallback, which the e2e tests hit in a real browser.
+
 ## Task 1: what I set up and why
 
 - **`.gitignore`, committed lockfile, `npm ci`**: reproducible installs, and no `node_modules`, `dist` or IDE folders in git. The repo came with someone's `.idea/` folder; I left that out.
