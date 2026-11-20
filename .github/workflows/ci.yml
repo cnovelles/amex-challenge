@@ -45,7 +45,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       # visual tests are skipped here: baselines are per-OS (see README)
       - run: npm run test:e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-report
